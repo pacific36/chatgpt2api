@@ -6,6 +6,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
@@ -319,6 +320,7 @@ class OpenAIBackendAPI:
                 raise RuntimeError("only string or list message content is supported")
             text_parts: list[str] = []
             image_inputs: list[tuple[bytes, str]] = []
+            file_inputs: list[tuple[bytes, str, str]] = []
             for part in content:
                 if not isinstance(part, dict):
                     continue
@@ -330,7 +332,15 @@ class OpenAIBackendAPI:
                     mime = str(part.get("mime") or "image/png")
                     if isinstance(data, (bytes, bytearray)):
                         image_inputs.append((bytes(data), mime))
-            if not image_inputs:
+                elif part_type == "file":
+                    data = part.get("data")
+                    if isinstance(data, (bytes, bytearray)):
+                        file_inputs.append((
+                            bytes(data),
+                            str(part.get("mime") or "application/octet-stream"),
+                            str(part.get("name") or "file"),
+                        ))
+            if not image_inputs and not file_inputs:
                 conversation_messages.append({
                     "id": new_uuid(),
                     "author": {"role": role},
@@ -338,39 +348,51 @@ class OpenAIBackendAPI:
                 })
                 continue
             if not self.access_token:
-                raise RuntimeError("authenticated upstream account required for image input")
-            uploaded: list[Dict[str, Any]] = []
+                raise RuntimeError("authenticated upstream account required for file input")
+            uploaded_images: list[Dict[str, Any]] = []
             for idx, (data, mime) in enumerate(image_inputs, start=1):
                 ext_part = mime.split("/", 1)[1].split("+")[0] if "/" in mime else "png"
                 extension = "jpg" if ext_part == "jpeg" else (ext_part or "png")
                 b64 = base64.b64encode(data).decode("ascii")
-                uploaded.append(self._upload_image(f"data:{mime};base64,{b64}", f"image_{idx}.{extension}"))
-            parts: list[Any] = []
-            for ref in uploaded:
-                parts.append({
-                    "content_type": "image_asset_pointer",
-                    "asset_pointer": f"file-service://{ref['file_id']}",
-                    "width": ref["width"],
-                    "height": ref["height"],
-                    "size_bytes": ref["file_size"],
-                })
+                uploaded_images.append(self._upload_image(f"data:{mime};base64,{b64}", f"image_{idx}.{extension}"))
+            uploaded_files: list[Dict[str, Any]] = []
+            for idx, (data, mime, name) in enumerate(file_inputs, start=1):
+                uploaded_files.append(self._upload_file(data, name or f"file_{idx}", mime))
+            attachments = [{
+                "id": ref["file_id"],
+                "mimeType": ref["mime_type"],
+                "name": ref["file_name"],
+                "size": ref["file_size"],
+                "width": ref["width"],
+                "height": ref["height"],
+            } for ref in uploaded_images] + [{
+                "id": ref["file_id"],
+                "mimeType": ref["mime_type"],
+                "name": ref["file_name"],
+                "size": ref["file_size"],
+            } for ref in uploaded_files]
             text = "".join(text_parts)
-            if text:
-                parts.append(text)
+            if uploaded_images:
+                parts: list[Any] = []
+                for ref in uploaded_images:
+                    parts.append({
+                        "content_type": "image_asset_pointer",
+                        "asset_pointer": f"file-service://{ref['file_id']}",
+                        "width": ref["width"],
+                        "height": ref["height"],
+                        "size_bytes": ref["file_size"],
+                    })
+                if text:
+                    parts.append(text)
+                message_content: Dict[str, Any] = {"content_type": "multimodal_text", "parts": parts}
+            else:
+                # Document-only attachments ride on metadata; content stays text.
+                message_content = {"content_type": "text", "parts": [text]}
             conversation_messages.append({
                 "id": new_uuid(),
                 "author": {"role": role},
-                "content": {"content_type": "multimodal_text", "parts": parts},
-                "metadata": {
-                    "attachments": [{
-                        "id": ref["file_id"],
-                        "mimeType": ref["mime_type"],
-                        "name": ref["file_name"],
-                        "size": ref["file_size"],
-                        "width": ref["width"],
-                        "height": ref["height"],
-                    } for ref in uploaded],
-                },
+                "content": message_content,
+                "metadata": {"attachments": attachments},
             })
         return conversation_messages
 
@@ -387,7 +409,10 @@ class OpenAIBackendAPI:
             "force_paragen_model_slug": "",
             "force_rate_limit": False,
             "force_use_sse": True,
-            "history_and_training_disabled": True,
+            # Sandbox-file download requires the upstream conversation to be
+            # retained so its interpreter/download endpoint can resolve the file.
+            # When that feature is on we must keep history enabled for this turn.
+            "history_and_training_disabled": not config.sandbox_download_enabled,
             "reset_rate_limits": False,
             "suggestions": [],
             "supported_encodings": [],
@@ -808,6 +833,49 @@ class OpenAIBackendAPI:
             "height": height,
         }
 
+    def _upload_file(self, data: bytes, file_name: str, mime_type: str) -> Dict[str, Any]:
+        """上传一个非图片附件（PDF / Word / 文本等），返回底层文件元数据。"""
+        path = "/backend-api/files"
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
+            json={"file_name": file_name, "file_size": len(data), "use_case": "my_files"},
+            timeout=60,
+        )
+        ensure_ok(response, path)
+        upload_meta = response.json()
+        time.sleep(0.5)
+        response = self.session.put(
+            upload_meta["upload_url"],
+            headers={
+                "Content-Type": mime_type or "application/octet-stream",
+                "x-ms-blob-type": "BlockBlob",
+                "x-ms-version": "2020-04-08",
+                "Origin": self.base_url,
+                "Referer": self.base_url + "/",
+                "User-Agent": self.user_agent,
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.8",
+            },
+            data=data,
+            timeout=120,
+        )
+        ensure_ok(response, "file_upload")
+        path = f"/backend-api/files/{upload_meta['file_id']}/uploaded"
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
+            data="{}",
+            timeout=60,
+        )
+        ensure_ok(response, path)
+        return {
+            "file_id": upload_meta["file_id"],
+            "file_name": file_name,
+            "file_size": len(data),
+            "mime_type": mime_type or "application/octet-stream",
+        }
+
     def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
                                 references: Optional[list[Dict[str, Any]]] = None) -> requests.Response:
         """启动图片生成或编辑的 SSE 请求。"""
@@ -1046,6 +1114,61 @@ class OpenAIBackendAPI:
         ensure_ok(response, path)
         data = response.json()
         return data.get("download_url") or data.get("url") or ""
+
+    def resolve_sandbox_download(
+        self,
+        conversation_id: str,
+        message_id: str,
+        sandbox_path: str,
+        max_wait_secs: float = 15.0,
+    ) -> Dict[str, Any]:
+        """解析 code interpreter 沙箱文件的真实下载地址。
+
+        对应官网点击 sandbox:/mnt/data/xxx 链接时调用的接口，需要 message_id
+        与 sandbox_path（任一同对话内的 message_id 均可）。文件刚生成时上游可能
+        返回 {"status":"retry"}（尚未落盘），与官网一样需要轮询直到拿到
+        download_url 或超时。
+        """
+        path = f"/backend-api/conversation/{conversation_id}/interpreter/download"
+        deadline = time.time() + max(0.0, max_wait_secs)
+        delay = 0.5
+        while True:
+            response = self.session.get(
+                self.base_url + path,
+                headers=self._headers(path, {"Accept": "application/json"}),
+                params={"message_id": message_id, "sandbox_path": sandbox_path},
+                timeout=60,
+            )
+            ensure_ok(response, path)
+            data = response.json()
+            if data.get("download_url"):
+                return data
+            if str(data.get("status") or "") != "retry" or time.time() >= deadline:
+                return data
+            time.sleep(min(delay, max(0.0, deadline - time.time())))
+            delay = min(delay * 1.5, 3.0)
+
+    def download_sandbox_file(self, conversation_id: str, message_id: str, sandbox_path: str) -> tuple[bytes, str, str]:
+        """解析并下载沙箱文件，返回 (内容字节, 文件名, mime)。
+
+        download_url 是 chatgpt.com 上的带签名地址，必须用账号会话拉取（外部无 auth
+        访问会 403），因此由代理用账号 token 取回字节再二次分发。
+        """
+        meta = self.resolve_sandbox_download(conversation_id, message_id, sandbox_path)
+        download_url = str(meta.get("download_url") or "")
+        if not download_url:
+            raise RuntimeError(f"sandbox download url missing: {meta}")
+        url_path = urlparse(download_url).path
+        response = self.session.get(
+            download_url,
+            headers=self._headers(url_path, {"Accept": "*/*"}),
+            timeout=120,
+        )
+        ensure_ok(response, "sandbox_file_download")
+        data = bytes(response.content)
+        file_name = str(meta.get("file_name") or "").strip() or sandbox_path.rstrip("/").rsplit("/", 1)[-1] or "file"
+        mime_type = str(meta.get("mime_type") or "").strip() or response.headers.get("Content-Type", "").split(";")[0].strip() or "application/octet-stream"
+        return data, file_name, mime_type
 
     def _resolve_image_urls(self, conversation_id: str, file_ids: list[str], sediment_ids: list[str]) -> list[str]:
         """把图片结果 id 解析成可下载 URL。"""

@@ -15,6 +15,7 @@ from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import (
     IMAGE_MODELS,
+    extract_file_from_message_content,
     extract_image_from_message_content,
     is_codex_image_model,
     is_supported_image_model,
@@ -117,21 +118,33 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
             content = message.get("content", "")
             text = message_text(content)
             images: list[tuple[bytes, str]] = []
+            files: list[tuple[bytes, str, str]] = []
             if role == "user":
                 images.extend(extract_image_from_message_content(content))
+                files.extend(extract_file_from_message_content(content))
                 if isinstance(content, list):
                     for part in content:
-                        if not isinstance(part, dict) or part.get("type") != "image":
+                        if not isinstance(part, dict):
                             continue
                         data = part.get("data")
-                        if isinstance(data, (bytes, bytearray)):
+                        if not isinstance(data, (bytes, bytearray)):
+                            continue
+                        if part.get("type") == "image":
                             images.append((bytes(data), str(part.get("mime") or "image/png")))
-            if images:
+                        elif part.get("type") == "file":
+                            files.append((
+                                bytes(data),
+                                str(part.get("mime") or "application/octet-stream"),
+                                str(part.get("name") or "file"),
+                            ))
+            if images or files:
                 parts: list[Any] = []
                 if text:
                     parts.append({"type": "text", "text": text})
                 for data, mime in images:
                     parts.append({"type": "image", "data": data, "mime": mime})
+                for data, mime, name in files:
+                    parts.append({"type": "file", "data": data, "mime": mime, "name": name})
                 normalized.append({"role": role, "content": parts})
             else:
                 normalized.append({"role": role, "content": text})
@@ -553,7 +566,34 @@ def text_backend() -> OpenAIBackendAPI:
     return OpenAIBackendAPI(access_token=account_service.get_text_access_token())
 
 
-def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
+@dataclass
+class TurnContext:
+    """Side channel for state the text path would otherwise discard.
+
+    stream_text_deltas yields plain text deltas; the upstream conversation_id
+    and message ids (needed to resolve code-interpreter sandbox files) are
+    captured here instead of being thrown away."""
+    conversation_id: str = ""
+    message_id: str = ""
+    backend: OpenAIBackendAPI | None = None
+
+
+def _event_message_id(raw: object) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    for candidate in (raw, raw.get("v")):
+        if isinstance(candidate, dict):
+            message = candidate.get("message")
+            if isinstance(message, dict) and message.get("id"):
+                return str(message["id"])
+    return ""
+
+
+def stream_text_deltas(
+    backend: OpenAIBackendAPI,
+    request: ConversationRequest,
+    context: "TurnContext | None" = None,
+) -> Iterator[str]:
     attempted_tokens: set[str] = set()
     token = getattr(backend, "access_token", "")
     emitted = False
@@ -564,7 +604,16 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             attempted_tokens.add(token)
         try:
             active_backend = OpenAIBackendAPI(access_token=token)
+            if context is not None:
+                context.backend = active_backend
             for event in conversation_events(active_backend, messages=request.messages, model=request.model, prompt=request.prompt):
+                if context is not None:
+                    conversation_id = str(event.get("conversation_id") or "")
+                    if conversation_id:
+                        context.conversation_id = conversation_id
+                    message_id = _event_message_id(event.get("raw"))
+                    if message_id:
+                        context.message_id = message_id
                 if event.get("type") != "conversation.delta":
                     continue
                 delta = str(event.get("delta") or "")
@@ -587,8 +636,12 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             raise
 
 
-def collect_text(backend: OpenAIBackendAPI, request: ConversationRequest) -> str:
-    return "".join(stream_text_deltas(backend, request))
+def collect_text(
+    backend: OpenAIBackendAPI,
+    request: ConversationRequest,
+    context: "TurnContext | None" = None,
+) -> str:
+    return "".join(stream_text_deltas(backend, request, context))
 
 
 def stream_image_outputs(

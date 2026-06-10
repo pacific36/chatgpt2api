@@ -14,7 +14,7 @@ def _is_openai_compatible_path(path: str) -> bool:
 
 
 def _is_anthropic_messages_path(path: str) -> bool:
-    return path == "/v1/messages"
+    return path == "/v1/messages" or path.startswith("/v1/messages/")
 
 
 def _compatible_error_response(

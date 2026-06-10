@@ -1,4 +1,5 @@
 import base64
+import binascii
 import hashlib
 import json
 import re
@@ -338,6 +339,47 @@ def extract_image_from_message_content(content: object) -> list[tuple[bytes, str
                 mime = header.split(";")[0].removeprefix("data:")
                 images.append((base64.b64decode(data), mime or "image/png"))
     return images
+
+
+def _decode_data_url(value: str) -> tuple[bytes, str] | None:
+    if not value.startswith("data:") or "," not in value:
+        return None
+    header, _, data = value.partition(",")
+    mime = header.split(";")[0].removeprefix("data:")
+    try:
+        return base64.b64decode(data), mime or "application/octet-stream"
+    except (ValueError, binascii.Error):
+        return None
+
+
+def extract_file_from_message_content(content: object) -> list[tuple[bytes, str, str]]:
+    """Extract document attachments as (data, mime, file_name) tuples.
+
+    Supports the OpenAI chat `file` content part and the Responses-style
+    `input_file` part, both carrying a base64 data URL.
+    """
+    if not isinstance(content, list):
+        return []
+    files: list[tuple[bytes, str, str]] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").strip()
+        if item_type == "file":
+            file_obj = item.get("file") if isinstance(item.get("file"), dict) else item
+            file_data = str(file_obj.get("file_data") or "")
+            file_name = str(file_obj.get("filename") or file_obj.get("file_name") or "").strip()
+        elif item_type == "input_file":
+            file_data = str(item.get("file_data") or "")
+            file_name = str(item.get("filename") or item.get("file_name") or "").strip()
+        else:
+            continue
+        decoded = _decode_data_url(file_data)
+        if decoded is None:
+            continue
+        data, mime = decoded
+        files.append((data, mime, file_name or "file"))
+    return files
 
 
 def extract_chat_image(body: dict[str, object]) -> list[tuple[bytes, str]]:

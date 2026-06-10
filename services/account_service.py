@@ -647,6 +647,27 @@ class AccountService:
             account = self._accounts.get(access_token)
             return dict(account) if account else None
 
+    @staticmethod
+    def account_ref_for_token(access_token: str) -> str:
+        """Stable account identifier derived from the access token's JWT subject.
+
+        Survives token refresh (same account → same sub), so a sandbox link can
+        re-find its owning account at click time even after the token rotates."""
+        return str(AccountService._decode_jwt_payload(access_token).get("sub") or "").strip()
+
+    def get_token_by_account_ref(self, ref: str) -> str:
+        """Return the current access token for the account matching ``ref`` (its
+        JWT subject), or "" if that account is no longer in the pool."""
+        ref = str(ref or "").strip()
+        if not ref:
+            return ""
+        with self._lock:
+            for item in self._accounts.values():
+                token = str(item.get("access_token") or "")
+                if token and self._decode_jwt_payload(token).get("sub") == ref:
+                    return token
+        return ""
+
     def list_accounts(self) -> list[dict]:
         with self._lock:
             return [dict(item) for item in self._accounts.values()]

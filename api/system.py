@@ -24,7 +24,25 @@ from services.image_service import (
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
+from services.protocol.sandbox_files import SandboxLinkError, fetch_sandbox_file
 from services.proxy_service import test_proxy
+
+
+def serve_sandbox_file(cid: str, mid: str, p: str, a: str, s: str) -> Response:
+    """Lazy proxy: resolve a sandbox file upstream on click and stream it back.
+
+    Stores nothing — the link is only as alive as the upstream conversation."""
+    try:
+        data, name, mime = fetch_sandbox_file(cid, mid, p, a, s)
+    except SandboxLinkError:
+        raise HTTPException(status_code=403, detail="链接签名无效")
+    except Exception:
+        raise HTTPException(status_code=404, detail="文件已失效或上游不可用") from None
+    return Response(
+        content=data,
+        media_type=mime or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{quote(name)}"'},
+    )
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -97,6 +115,16 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)
     async def get_image_thumbnail(image_path: str):
         return get_thumbnail_response(image_path)
+
+    @router.get("/sandbox-files", include_in_schema=False)
+    async def download_sandbox_file(
+            cid: str = Query(default=""),
+            mid: str = Query(default=""),
+            p: str = Query(default=""),
+            a: str = Query(default=""),
+            s: str = Query(default=""),
+    ):
+        return await run_in_threadpool(serve_sandbox_file, cid, mid, p, a, s)
 
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):

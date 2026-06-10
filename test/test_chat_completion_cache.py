@@ -35,7 +35,7 @@ class ChatCompletionCacheTests(unittest.TestCase):
     def test_repeated_non_stream_text_completion_uses_cache(self) -> None:
         calls = 0
 
-        def fake_collect_text(_backend, _request):
+        def fake_collect_text(_backend, _request, _context=None):
             nonlocal calls
             calls += 1
             return f"cached answer {calls}"
@@ -61,7 +61,7 @@ class ChatCompletionCacheTests(unittest.TestCase):
     def test_repeated_stream_text_completion_replays_cached_chunks(self) -> None:
         calls = 0
 
-        def fake_stream_text_deltas(_backend, _request):
+        def fake_stream_text_deltas(_backend, _request, _context=None):
             nonlocal calls
             calls += 1
             yield "streamed"
@@ -91,7 +91,7 @@ class ChatCompletionCacheTests(unittest.TestCase):
     def test_adjacent_duplicate_messages_are_removed_before_upstream_call(self) -> None:
         captured_messages = []
 
-        def fake_collect_text(_backend, request):
+        def fake_collect_text(_backend, request, _context=None):
             captured_messages.extend(request.messages or [])
             return "ok"
 
@@ -153,7 +153,7 @@ class ChatCompletionCacheTests(unittest.TestCase):
     def test_repeated_responses_text_request_uses_cache(self) -> None:
         calls = 0
 
-        def fake_stream_text_deltas(_backend, _request):
+        def fake_stream_text_deltas(_backend, _request, _context=None):
             nonlocal calls
             calls += 1
             yield f"response cache {calls}"

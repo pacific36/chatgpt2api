@@ -48,6 +48,17 @@ DEFAULT_CHAT_COMPLETION_CACHE = {
     "drop_assistant_history": False,
 }
 
+DEFAULT_SANDBOX_DOWNLOAD = {
+    # When enabled, code-interpreter sandbox links (e.g. sandbox:/mnt/data/x.csv)
+    # are rewritten to a lazy proxy URL. On click the proxy re-resolves the file
+    # upstream through the owning account session and streams the bytes through —
+    # nothing is stored locally. The link lives exactly as long as the upstream
+    # conversation/account does.
+    # This REQUIRES keeping upstream history enabled for chat turns, so those
+    # conversations are persisted on the ChatGPT account (privacy tradeoff).
+    "enabled": True,
+}
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -160,6 +171,13 @@ def _normalize_chat_completion_cache_settings(value: object) -> dict[str, object
             source.get("drop_assistant_history"),
             bool(DEFAULT_CHAT_COMPLETION_CACHE["drop_assistant_history"]),
         ),
+    }
+
+
+def _normalize_sandbox_download_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "enabled": _normalize_bool(source.get("enabled"), bool(DEFAULT_SANDBOX_DOWNLOAD["enabled"])),
     }
 
 
@@ -341,6 +359,10 @@ class ConfigStore:
         return path
 
     @property
+    def sandbox_download_enabled(self) -> bool:
+        return bool(self.get_sandbox_download_settings()["enabled"])
+
+    @property
     def image_thumbnails_dir(self) -> Path:
         path = DATA_DIR / "image_thumbnails"
         path.mkdir(parents=True, exist_ok=True)
@@ -393,6 +415,7 @@ class ConfigStore:
         data["backup"] = self.get_backup_settings()
         data["image_storage"] = self.get_image_storage_settings()
         data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
+        data["sandbox_download"] = self.get_sandbox_download_settings()
         data.pop("auth-key", None)
         return data
 
@@ -411,6 +434,10 @@ class ConfigStore:
             next_data["chat_completion_cache"] = _normalize_chat_completion_cache_settings(
                 next_data.get("chat_completion_cache")
             )
+        if "sandbox_download" in next_data:
+            next_data["sandbox_download"] = _normalize_sandbox_download_settings(
+                next_data.get("sandbox_download")
+            )
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
@@ -424,6 +451,9 @@ class ConfigStore:
 
     def get_chat_completion_cache_settings(self) -> dict[str, object]:
         return _normalize_chat_completion_cache_settings(self.data.get("chat_completion_cache"))
+
+    def get_sandbox_download_settings(self) -> dict[str, object]:
+        return _normalize_sandbox_download_settings(self.data.get("sandbox_download"))
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

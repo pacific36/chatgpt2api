@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from services.account_service import account_service
@@ -51,3 +52,32 @@ def list_models() -> dict[str, Any]:
                 "parent": None,
             })
     return result
+
+
+def to_anthropic_models(result: dict[str, Any]) -> dict[str, Any]:
+    """Convert the OpenAI-style model list to the Anthropic GET /v1/models shape."""
+    data = result.get("data")
+    items = [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+    models = []
+    for item in items:
+        model_id = str(item.get("id") or "").strip()
+        if not model_id:
+            continue
+        created = item.get("created")
+        created_at = (
+            datetime.fromtimestamp(created, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            if isinstance(created, (int, float)) and created > 0
+            else "1970-01-01T00:00:00Z"
+        )
+        models.append({
+            "type": "model",
+            "id": model_id,
+            "display_name": model_id,
+            "created_at": created_at,
+        })
+    return {
+        "data": models,
+        "first_id": models[0]["id"] if models else None,
+        "last_id": models[-1]["id"] if models else None,
+        "has_more": False,
+    }

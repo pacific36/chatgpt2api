@@ -81,6 +81,47 @@ class AnthropicMessagesTests(unittest.TestCase):
             if payload.get("type") == "message_stop":
                 break
 
+    def test_count_tokens_http(self):
+        """测试 Anthropic /v1/messages/count_tokens 接口。"""
+        response = requests.post(
+            f"{BASE_URL}/v1/messages/count_tokens",
+            headers=self._headers(),
+            json={
+                "model": MODEL,
+                "system": "你是一个简洁的助手。",
+                "messages": [
+                    {"role": "user", "content": "你好，请简单介绍一下你自己。"},
+                ],
+            },
+            timeout=60,
+        )
+        print("count_tokens status:")
+        print(response.status_code)
+        print("count_tokens result:")
+        print(response.text)
+
+    def test_message_stop_sequences_http(self):
+        """测试 stop_sequences 与 max_tokens 参数。"""
+        response = requests.post(
+            f"{BASE_URL}/v1/messages",
+            headers=self._headers(),
+            json={
+                "model": MODEL,
+                "max_tokens": 64,
+                "stop_sequences": ["。"],
+                "messages": [
+                    {"role": "user", "content": "用三句话介绍一下你自己。"},
+                ],
+            },
+            timeout=300,
+        )
+        print("stop_sequences status:")
+        print(response.status_code)
+        try:
+            print(json.dumps(response.json(), ensure_ascii=False, indent=2))
+        except Exception:
+            print(response.text)
+
 
 if __name__ == "__main__":
     unittest.main()

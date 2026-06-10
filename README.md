@@ -86,6 +86,8 @@ environment:
 - 兼容 `POST /v1/images/edits` 图片编辑接口
 - 兼容面向图片场景的 `POST /v1/chat/completions`
 - 兼容面向图片场景的 `POST /v1/responses`
+- 兼容 Anthropic 协议的 `POST /v1/messages` 与 `POST /v1/messages/count_tokens`，可直接接入 Claude 系客户端
+- `POST /v1/chat/completions` 文本链路支持图片与文档附件（OpenAI `file` / `image_url` 内容块，PDF / Word / 文本等），自动上传到上游对话
 - `GET /v1/models` 返回 `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、
   `gpt-5-mini`
 - 支持通过 `n` 返回多张生成结果
@@ -317,6 +319,69 @@ curl http://localhost:8000/v1/responses \
 
 <br>
 </details>
+</details>
+
+<details>
+<summary><code>POST /v1/messages</code></summary>
+<br>
+
+Anthropic Messages 兼容接口，可作为 Claude 系客户端（如 Claude Code、Cherry Studio 的 Anthropic 渠道）的上游使用。鉴权同时支持 `x-api-key: <auth-key>` 和 `Authorization: Bearer <auth-key>`。
+
+```bash
+curl http://localhost:8000/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: <auth-key>" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "auto",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "你好，请简单介绍一下你自己。"}
+    ]
+  }'
+```
+
+<details>
+<summary>字段说明</summary>
+<br>
+
+| 字段               | 说明                                                            |
+|:-----------------|:--------------------------------------------------------------|
+| `model`          | 文本模型，推荐 `auto` 或 `gpt-5` 系列                                    |
+| `messages`       | Anthropic 格式消息数组，支持 `text` / `image` 内容块与 `tool_use` / `tool_result` |
+| `system`         | 系统提示词，支持字符串或内容块数组                                              |
+| `tools`          | 工具定义数组，工具调用以 `tool_use` 内容块返回，`stop_reason` 为 `tool_use`        |
+| `stop_sequences` | 自定义停止序列，命中时 `stop_reason` 为 `stop_sequence` 并回填 `stop_sequence` 字段 |
+| `max_tokens`     | 输出 token 上限，超出时截断并返回 `stop_reason: "max_tokens"`                |
+| `stream`         | 流式输出，SSE 事件为标准 Anthropic 序列（`message_start` / `ping` / `content_block_*` / `message_delta` / `message_stop`） |
+
+错误响应使用 Anthropic 信封格式 `{"type": "error", "error": {...}}`。
+
+<br>
+</details>
+</details>
+
+<details>
+<summary><code>POST /v1/messages/count_tokens</code></summary>
+<br>
+
+Anthropic Token 计数兼容接口，返回请求消息的输入 token 数。
+
+```bash
+curl http://localhost:8000/v1/messages/count_tokens \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: <auth-key>" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "auto",
+    "messages": [
+      {"role": "user", "content": "你好"}
+    ]
+  }'
+```
+
+返回示例：`{"input_tokens": 9}`
+
 </details>
 
 ## 社区支持

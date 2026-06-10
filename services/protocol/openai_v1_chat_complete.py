@@ -6,10 +6,18 @@ from typing import Any, Iterable, Iterator
 
 from fastapi import HTTPException
 
+from services.config import config
 from services.protocol.chat_completion_cache import cache_key, chat_completion_cache, normalize_text_messages
+from services.protocol.sandbox_files import (
+    contains_sandbox_link,
+    resolve_sandbox_links,
+    rewrite_sandbox_links,
+    scrub_sandbox_stream,
+)
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
+    TurnContext,
     collect_image_outputs,
     collect_text,
     count_message_image_tokens,
@@ -21,6 +29,20 @@ from services.protocol.conversation import (
     stream_text_deltas,
     text_backend,
 )
+
+
+def _sandbox_rewriter(context: TurnContext, base_url: str | None):
+    """Return the text post-processor for sandbox links: real download
+    resolution when enabled, otherwise the dead-link note."""
+
+    def rewrite(text: str) -> str:
+        if not contains_sandbox_link(text):
+            return text
+        if config.sandbox_download_enabled:
+            return resolve_sandbox_links(text, context.backend, context.conversation_id, context.message_id, base_url)
+        return rewrite_sandbox_links(text)
+
+    return rewrite
 from utils.helper import build_chat_image_markdown_content, extract_chat_image, extract_chat_prompt, is_image_chat_request, parse_image_count
 from utils.image_tokens import (
     chat_usage_from_image_usage,
@@ -84,12 +106,14 @@ def completion_response(
     }
 
 
-def stream_text_chat_completion(backend, messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
+def stream_text_chat_completion(backend, messages: list[dict[str, Any]], model: str, base_url: str | None = None) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     sent_role = False
     request = ConversationRequest(model=model, messages=messages)
-    for delta_text in stream_text_deltas(backend, request):
+    context = TurnContext()
+    deltas = stream_text_deltas(backend, request, context)
+    for delta_text in scrub_sandbox_stream(deltas, _sandbox_rewriter(context, base_url)):
         if not sent_role:
             sent_role = True
             yield completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created)
@@ -207,7 +231,14 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
     yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
+def _collect_resolved_text(model: str, messages: list[dict[str, Any]], base_url: str | None) -> str:
+    context = TurnContext()
+    text = collect_text(text_backend(), ConversationRequest(model=model, messages=messages), context)
+    return _sandbox_rewriter(context, base_url)(text)
+
+
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
+    base_url = str(body.get("base_url") or "") or None
     if body.get("stream"):
         if is_image_chat_request(body):
             return image_chat_events(body)
@@ -215,7 +246,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         key = cache_key(body, messages, stream=True)
         return chat_completion_cache.get_or_compute_stream(
             key,
-            lambda: stream_text_chat_completion(text_backend(), messages, model),
+            lambda: stream_text_chat_completion(text_backend(), messages, model, base_url),
         )
     if is_image_chat_request(body):
         return image_chat_response(body)
@@ -225,7 +256,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         key,
         lambda: completion_response(
             model,
-            collect_text(text_backend(), ConversationRequest(model=model, messages=messages)),
+            _collect_resolved_text(model, messages, base_url),
             messages=messages,
         ),
     )

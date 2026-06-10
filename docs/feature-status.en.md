@@ -30,8 +30,10 @@
 | `/v1/complete` 文本补全与流式输出 | ✅  | 已实现。 |
 | 流式输出支持 | ✅  | 已实现。 |
 | 文本补全缓存与重复请求合并 | ✅  | `/v1/chat/completions` 文本链路默认启用 60 秒短缓存、流式结果回放、in-flight 请求合并和相邻重复消息清理；可通过 `chat_completion_cache` 配置关闭或调整。 |
-| 图片尺寸参数 | ❌  | 待实现。 |
+| 对话文件附件（图片 / PDF / Word / 文本等） | ✅  | `/v1/chat/completions` 支持 OpenAI `image_url` 与 `file` / `input_file` 内容块；图片走 `multimodal` 上传并以 `image_asset_pointer` 入会话，文档走 `my_files` 上传并挂载到消息 attachments，已对真实上游验证 txt / pdf / docx / png。前端对话页支持附件选择、预览与历史回看。 |
+| 模型沙箱（code interpreter）文件下载 | ✅  | 模型用 code interpreter 生成的 `sandbox:/mnt/data/...` 文件可真实下载，采用**惰性透传、零本地存储**：响应里把死链改写为带签名的 `/sandbox-files?cid=...&mid=...&p=...&a=...&s=...` 代理链接（生成时不发任何网络请求）；**点击时**才由代理用建该对话的那个账号会话现场调 `interpreter/download` 解析（带轮询等待落盘）→ 取回字节 → 流式透传，本地不留任何文件。链接生命周期与上游一致：上游对话/账号还在就能下，没了即死链（404）。链接用 `auth-key` 做 HMAC 签名，伪造直接 403。受 `sandbox_download` 开关控制（默认开启）；**开启即要求对话开启上游历史**（`history_and_training_disabled=False`），这些经 API 的对话会保存到 ChatGPT 账号并可能用于训练；关闭时回退为死链提示。已对真实账号端到端验证（点击 → 200、16 字节内容一致、attachment 头；伪造签名 → 403；上游无文件 → 404）。注意：能否下载取决于模型当次是否真执行了代码——`auto` 路由有时只输出链接而不执行，此时点击为 404。 |
+| 图片尺寸参数 | ⚠️ | `/v1/images/generations` 已接受 `size` 参数并以提示词方式传递给上游；由于 ChatGPT 官网生图接口本身不支持精确尺寸控制，最终尺寸仍取决于上游。 |
 | 服务端图片 URL 缓存 | ✅  | 已实现。 |
 | `rt_token` 刷新 | ❌  | 待实现。 |
 | 代理配置功能 | ✅  | 已支持网页端配置全局 HTTP / HTTPS / SOCKS5 / SOCKS5H 代理，并应用到出站请求。 |
-| Anthropic 协议支持 | ❌  | 待实现。 |
+| Anthropic 协议支持 | ✅  | 已支持 `POST /v1/messages`（流式 / 非流式、`system`、`tools`、`stop_sequences`、`max_tokens`）、`POST /v1/messages/count_tokens`，以及面向 Anthropic 客户端（携带 `anthropic-version` 头）的 `GET /v1/models`；错误以 Anthropic `{"type":"error",...}` 信封返回，鉴权支持 `x-api-key` 与 `Authorization: Bearer`。 |

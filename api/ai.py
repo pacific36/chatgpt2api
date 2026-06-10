@@ -68,12 +68,19 @@ def create_router() -> APIRouter:
     router = APIRouter()
 
     @router.get("/v1/models")
-    async def list_models(authorization: str | None = Header(default=None)):
-        require_identity(authorization)
+    async def list_models(
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="x-api-key"),
+            anthropic_version: str | None = Header(default=None, alias="anthropic-version"),
+    ):
+        require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
         try:
-            return await run_in_threadpool(openai_v1_models.list_models)
+            result = await run_in_threadpool(openai_v1_models.list_models)
         except Exception as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+        if anthropic_version:
+            return openai_v1_models.to_anthropic_models(result)
+        return result
 
     @router.post("/v1/images/generations")
     async def generate_images(
@@ -104,9 +111,14 @@ def create_router() -> APIRouter:
         return await call.run(openai_v1_image_edit.handle, payload)
 
     @router.post("/v1/chat/completions")
-    async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
+    async def create_chat_completion(
+            body: ChatCompletionRequest,
+            request: Request,
+            authorization: str | None = Header(default=None),
+    ):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
+        payload["base_url"] = resolve_image_base_url(request)
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("prompt"), payload.get("messages"))
         call = LoggedCall(identity, "/v1/chat/completions", model, "文本生成", request_text=request_preview)
@@ -126,16 +138,34 @@ def create_router() -> APIRouter:
     @router.post("/v1/messages")
     async def create_message(
             body: AnthropicMessageRequest,
+            request: Request,
             authorization: str | None = Header(default=None),
             x_api_key: str | None = Header(default=None, alias="x-api-key"),
             anthropic_version: str | None = Header(default=None, alias="anthropic-version"),
     ):
         identity = require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
         payload = body.model_dump(mode="python")
+        payload["base_url"] = resolve_image_base_url(request)
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("system"), payload.get("messages"), payload.get("tools"))
         call = LoggedCall(identity, "/v1/messages", model, "Messages", request_text=request_preview)
         await filter_or_log(call, request_preview)
         return await call.run(anthropic_v1_messages.handle, payload, sse="anthropic")
+
+    @router.post("/v1/messages/count_tokens")
+    async def count_message_tokens(
+            body: AnthropicMessageRequest,
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="x-api-key"),
+            anthropic_version: str | None = Header(default=None, alias="anthropic-version"),
+    ):
+        require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
+        payload = body.model_dump(mode="python")
+        try:
+            return await run_in_threadpool(anthropic_v1_messages.count_tokens, payload)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return router
